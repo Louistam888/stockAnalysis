@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/csv"
 	"fmt"
+	"math"
+	"net/http"
 	"os"
 	"slices"
 	"strconv"
@@ -12,6 +14,19 @@ type Stock struct {
 	Ticker       string
 	Gap          float64
 	OpeningPrice float64
+}
+
+type Position struct {
+	EntryPrice      float64
+	Shares          int
+	TakeProfitPrice float64
+	StopLossPrice   float64
+	Profit          float64
+}
+
+type Selection struct {
+	Ticker string
+	Position
 }
 
 func Load(path string) ([]Stock, error) {
@@ -59,12 +74,64 @@ func Load(path string) ([]Stock, error) {
 	return stocks, nil
 }
 
+func Calculate(gapPercent, openingPrice float64) Position {
+	closingPrice := openingPrice / (1 + gapPercent)
+	gapValue := closingPrice - openingPrice
+	profitFromGap := profitPercent * gapValue
+	stopLoss := openingPrice - profitFromGap
+	takeProfit := openingPrice + profitFromGap
+	shares := int(maxLossPerTrade / math.Abs(stopLoss-openingPrice))
+
+	profit := math.Abs(openingPrice-takeProfit) * float64(shares)
+	profit = math.Round(profit*100) / 100
+
+	return Position{
+		EntryPrice:      math.Round(openingPrice*100) / 100,
+		Shares:          shares,
+		TakeProfitPrice: math.Round(takeProfit*100) / 100,
+		StopLossPrice:   math.Round(stopLoss*100) / 100,
+		Profit:          math.Round(profit*100) / 100,
+	}
+}
+
+const (
+	url          = "https://seeking-alpha.p.rapidapi.com/news/v2/list-by-symbol?size=5&id="
+	apiKeyHeader = "x-rapidapi-key"
+	apiKey       = "f8bbeecee3mshd11af53a602b7fcp133f59jsn3b4ffb3f20df"
+)
+
+func FetchNews(ticker string) error {
+	req, err := http.NewRequest(http.MethodGet, url+ticker, nil)
+
+	if err != nil {
+		return err
+	}
+}
+
+var accountBalance = 10000.0
+var lossTolerance = .02
+var maxLossPerTrade = accountBalance * lossTolerance
+var profitPercent = .8
+
 func main() {
 	stocks, err := Load("./opg.csv")
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-}
+	slices.DeleteFunc(stocks, func(stock Stock) bool {
+		return math.Abs(stock.Gap) < .1
+	})
 
-//317
+	var selections []Selection
+
+	for _, stock := range stocks {
+		position := Calculate(stock.Gap, stock.OpeningPrice)
+
+		sel := Selection{
+			Ticker:   stock.Ticker,
+			Position: position,
+		}
+		selections = append(selections, sel)
+	}
+}
