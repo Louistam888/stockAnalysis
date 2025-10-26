@@ -10,15 +10,8 @@ import (
 	"os"
 	"slices"
 	"strconv"
-	"sync"
 	"time"
 )
-
-type Stock struct {
-	Ticker       string
-	Gap          float64
-	OpeningPrice float64
-}
 
 type Position struct {
 	EntryPrice      float64
@@ -188,19 +181,17 @@ func main() {
 		return math.Abs(stock.Gap) < .1
 	})
 
-	var selections []Selection
+	selectionsChan := make(chan Selection, len(stocks))
 
-	var wg sync.WaitGroup
 	for _, stock := range stocks {
-		wg.Add(1)
 
-		go func(s Stock) {
-			defer wg.Done()
+		go func(s Stock, selected chan<- Selection) {
 			position := Calculate(stock.Gap, stock.OpeningPrice)
 			articles, err := FetchNews(stock.Ticker)
 
 			if err != nil {
 				log.Printf("error loading news %s, %v", stock.Ticker, err)
+				selected <- Selection{}
 			} else {
 				log.Printf("Found %d articles about %s", len(articles), stock.Ticker)
 			}
@@ -210,10 +201,18 @@ func main() {
 				Position: position,
 				Articles: articles,
 			}
-			selections = append(selections, sel)
-		}(stock)
+			selected <- sel
+		}(stock, selectionsChan)
 	}
-	wg.Wait()
+
+	var selections []Selection
+
+	for sel := range selectionsChan {
+		selections = append(selections, sel)
+		if len(selections) == len(stocks) {
+			close(selectionsChan)
+		}
+	}
 
 	outputPath := "./opg.json"
 	err = Deliver(outputPath, selections)
@@ -223,4 +222,3 @@ func main() {
 	}
 	log.Printf("Finished writing output to %s\n", outputPath)
 }
-//339
