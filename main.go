@@ -1,224 +1,71 @@
 package main
 
 import (
-	"encoding/csv"
-	"encoding/json"
+	"flag"
 	"fmt"
-	"log"
-	"math"
-	"net/http"
 	"os"
-	"slices"
-	"strconv"
-	"time"
+
+	root "github.com/louistam888/stockAnalysis/cmd"
+	"github.com/louistam888/stockAnalysis/internal/news"
+	"github.com/louistam888/stockAnalysis/internal/pos"
+	"github.com/louistam888/stockAnalysis/internal/raw"
+	"github.com/louistam888/stockAnalysis/internal/trade"
+	"github.com/louistam888/stockAnalysis/pkg/csv"
+	"github.com/louistam888/stockAnalysis/pkg/json"
+	"github.com/louistam888/stockAnalysis/pkg/process"
+	"github.com/louistam888/stockAnalysis/pkg/salpha"
 )
 
-type Position struct {
-	EntryPrice      float64
-	Shares          int
-	TakeProfitPrice float64
-	StopLossPrice   float64
-	Profit          float64
-}
-
-type Selection struct {
-	Ticker string
-	Position
-	Articles []Article
-}
-
-type attributes struct {
-	PublishOn time.Time `json:"publishOn"`
-	Title     string    `json:"title"`
-}
-
-type seekingAlphaNews struct {
-	Attributes attributes `json:"attributeS"`
-}
-
-type SeekingAlphaResponse struct {
-	Data []seekingAlphaNews `json:"data`
-}
-
-type Article struct {
-	PublishOn time.Time
-	Headline  string
-}
-
-func Load(path string) ([]Stock, error) {
-	f, err := os.Open(path) //if is the opened csv file
-
-	if err != nil {
-		fmt.Println(err)
-		return nil, err
-	}
-
-	defer f.Close()
-
-	r := csv.NewReader(f)
-	rows, err := r.ReadAll()
-
-	if err != nil {
-		fmt.Println(err)
-		return nil, err
-	}
-
-	rows = slices.Delete(rows, 0, 1)
-
-	var stocks []Stock
-
-	for _, row := range rows {
-		ticker := row[0]
-		gap, err := strconv.ParseFloat(row[1], 64)
-
-		if err != nil {
-			continue
-		}
-
-		openingPrice, err := strconv.ParseFloat(row[2], 64)
-
-		if err != nil {
-			continue
-		}
-
-		stocks = append(stocks, Stock{
-			Ticker:       ticker,
-			Gap:          gap,
-			OpeningPrice: openingPrice,
-		})
-	}
-	return stocks, nil
-}
-
-func Calculate(gapPercent, openingPrice float64) Position {
-	closingPrice := openingPrice / (1 + gapPercent)
-	gapValue := closingPrice - openingPrice
-	profitFromGap := profitPercent * gapValue
-	stopLoss := openingPrice - profitFromGap
-	takeProfit := openingPrice + profitFromGap
-	shares := int(maxLossPerTrade / math.Abs(stopLoss-openingPrice))
-
-	profit := math.Abs(openingPrice-takeProfit) * float64(shares)
-	profit = math.Round(profit*100) / 100
-
-	return Position{
-		EntryPrice:      math.Round(openingPrice*100) / 100,
-		Shares:          shares,
-		TakeProfitPrice: math.Round(takeProfit*100) / 100,
-		StopLossPrice:   math.Round(stopLoss*100) / 100,
-		Profit:          math.Round(profit*100) / 100,
-	}
-}
-
-const (
-	url          = "https://seeking-alpha.p.rapidapi.com/news/v2/list-by-symbol?size=5&id="
-	apiKeyHeader = "x-rapidapi-key"
-	apiKey       = "f8bbeecee3mshd11af53a602b7fcp133f59jsn3b4ffb3f20df"
-)
-
-func FetchNews(ticker string) ([]Article, error) {
-	req, err := http.NewRequest(http.MethodGet, url+ticker, nil)
-
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Add(apiKeyHeader, apiKey)
-	client := &http.Client{}
-	resp, err := client.Do(req) //returns pointerto http res type and an error
-
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return nil, fmt.Errorf("unsuccessful status code received", resp.StatusCode)
-	}
-
-	res := &SeekingAlphaResponse{}
-
-	json.NewDecoder(resp.Body).Decode(res) //converts res into json type
-
-	var articles []Article
-
-	for _, item := range res.Data {
-		art := Article{
-			PublishOn: item.Attributes.PublishOn,
-			Headline:  item.Attributes.Title,
-		}
-		articles = append(articles, art)
-	}
-	return articles, nil
-}
-
-func Deliver(filePath string, selections []Selection) error {
-	file, err := os.Create(filePath)
-	if err != nil {
-		return fmt.Errorf("error creating file: %w", err)
-	}
-	defer file.Close()
-
-	encoder := json.NewEncoder(file)
-	err = encoder.Encode(selections)
-	if err != nil {
-		return fmt.Errorf("error encoding selections: %w", err)
-	}
-	return nil
-}
-
-var accountBalance = 10000.0
-var lossTolerance = .02
-var maxLossPerTrade = accountBalance * lossTolerance
-var profitPercent = .8
+// const (
+// 	url          = "https://seeking-alpha.p.rapidapi.com/news/v2/list-by-symbol?size=5&id="
+// 	apiKeyHeader = "x-rapidapi-key"
+// 	apiKey       = "f8bbeecee3mshd11af53a602b7fcp133f59jsn3b4ffb3f20df"
+// )
 
 func main() {
-	stocks, err := Load("./opg.csv")
+	var seekingAlphaURL = os.Getenv("SEEKING_ALPHA_URL")
+	var seekingAlphaAPIKey = os.Getenv("SEEKING_ALPHA_API_KEY")
+
+	//validate env varibales
+	if seekingAlphaURL == "" {
+		fmt.Println("Missing SEEKING_ALPHA_URL environment variable")
+		os.Exit(1)
+	}
+	if seekingAlphaAPIKey == "" {
+		fmt.Println("Missing SEEKING_ALPHA_API_KEY environment variable")
+		os.Exit(1)
+	}
+
+	//define commandline flags
+
+	inputPath := flag.String("i", "", "path to input file (required)")
+	accountBalance := flag.Float64("b", 0.0, "Account balance (required)")
+	outputPath := flag.String("o", "./opg/json", "Path to output file")
+	lossTolerance := flag.Float64("l", 0.02, "Loss tolerance percentage")
+	profitPercent := flag.Float64("p", 0.8, "Percentage of the gap to take as a profit")
+	minGap := flag.Float64("m", 0.1, "Minimum gap value to consider")
+
+	//parse command lineflags
+	flag.Parse()
+
+	//check if requried flags are provided
+
+	if *inputPath == "" || *accountBalance == 0.0 {
+		flag.PrintDefaults()
+		os.Exit(1)
+	}
+
+	var ldr raw.Loader = csv.NewLoader(*inputPath)
+	var f raw.Filterer = process.NewFilterer(*minGap)
+	var c pos.Calculator = process.NewCalculator(*accountBalance, *lossTolerance, *profitPercent)
+	var fet news.Fetcher = salpha.NewClient(seekingAlphaURL, seekingAlphaAPIKey)
+	var del trade.Deliverer = json.NewDeliverer(*outputPath)
+
+	err := root.Run(ldr, f, c, fet, del)
 	if err != nil {
 		fmt.Println(err)
-		return
-	}
-	stocks = slices.DeleteFunc(stocks, func(stock Stock) bool {
-		return math.Abs(stock.Gap) < .1
-	})
-
-	selectionsChan := make(chan Selection, len(stocks))
-
-	for _, stock := range stocks {
-
-		go func(s Stock, selected chan<- Selection) {
-			position := Calculate(stock.Gap, stock.OpeningPrice)
-			articles, err := FetchNews(stock.Ticker)
-
-			if err != nil {
-				log.Printf("error loading news %s, %v", stock.Ticker, err)
-				selected <- Selection{}
-			} else {
-				log.Printf("Found %d articles about %s", len(articles), stock.Ticker)
-			}
-
-			sel := Selection{
-				Ticker:   stock.Ticker,
-				Position: position,
-				Articles: articles,
-			}
-			selected <- sel
-		}(stock, selectionsChan)
+		os.Exit(1)
 	}
 
-	var selections []Selection
-
-	for sel := range selectionsChan {
-		selections = append(selections, sel)
-		if len(selections) == len(stocks) {
-			close(selectionsChan)
-		}
-	}
-
-	outputPath := "./opg.json"
-	err = Deliver(outputPath, selections)
-	if err != nil {
-		log.Printf("Error writing output, %v", err)
-		return
-	}
-	log.Printf("Finished writing output to %s\n", outputPath)
 }
+//356

@@ -17,3 +17,9 @@ func (n *filterer) Filter(candidates []raw.Stock) (filtered []raw.Stock) {
 	})
 	return
 }
+
+func NewFilterer(minGap float64) raw.Filterer {
+	return &filterer{
+		minGap: minGap,
+	}
+}
